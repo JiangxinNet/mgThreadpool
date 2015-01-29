@@ -1,54 +1,10 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <mgStd/mglist.h>
 
-
-#define MGTHREADPOOL_MAX_THREAD             256
-#define MGTHREADPOOL_DEFAULT_MAX_TASK       10000
-
-typedef (void)(*mgThreadpool_task_fun)(void *);
-
-typedef struct mgThreadpool_task
-{
-    mgThreadpool_task_fun   task_function;
-    void                    *task_arg;
-    mglist                  list_node;
-}mgThreadpool_task;
-
-typedef struct mgThreadpool_thread
-{
-    pthread_t               thread_id;
-    int                     is_busy;
-    int                     thread_task_num;
-    mglist                  thread_task_list;
-    pthread_mutex_t         thread_mutex;
-}mgThreadpool_thread;
-
-typedef struct mgThreadpool
-{
-    int                     thread_num;             //线程数
-
-    int                     max_task_num;           //任务处理最大数
-    int                     long_task_num;          //长任务数
-    mglist                  long_task_queue;        //长任务队列
-    pthread_mutex_t         long_task_mutex;        //长任务锁
-    
-    pthread_cond_t          task_process_cond;      //任务处理变量，用来唤醒处理线程
-    pthread_mutex_t         task_process_mutex;     //任务处理变量锁
-    
-    mgThreadpool_thread     *thread;                //处理线程
-
-    mgThreadpool_task       **idle_task;            //空闲任务缓存
-    int                     idle_task_count;        //空闲任务总量
-    int                     idle_task_num;          //剩余空闲任务数
-    pthread_mutex_t         idle_task_mutex;        //空闲任务锁
-
-    int                     close_flag;             //关闭标志
-
-}mgThreadpool;
+#include "mgThreadpool.h"
 
 /*
  *空闲任务缓存初始化
@@ -70,10 +26,11 @@ static void mgThreadpool_idle_task_init(mgThreadpool *thread_pool)
     {
         pthread_mutex_lock(&thread_pool->idle_task_mutex);
         thread_pool->idle_task_count = 50;
-        idle_task = (mgThreadpool_task **)calloc(sizeof(mgThreadpool_task*) * thread_pool->idle_task_count);
+        thread_pool->idle_task = 
+            (mgThreadpool_task **)calloc(sizeof(mgThreadpool_task*), thread_pool->idle_task_count);
         pthread_mutex_unlock(&thread_pool->idle_task_mutex);
     }
-    return idle_task;
+    return;
 }
 
 /*
@@ -110,7 +67,8 @@ static void mgThreadpool_put_idle_task(mgThreadpool *thread_pool, mgThreadpool_t
         return;
     task->task_function = NULL;
     task->task_arg = NULL;
-    mglist_init(&(idle_task->list_node));
+    mglist_init(&(task->list_node));
+
     if (thread_pool->idle_task_num >= MGTHREADPOOL_DEFAULT_MAX_TASK)
     {
         free(task);
@@ -151,28 +109,28 @@ static void mgThreadpool_idle_task_finish(mgThreadpool *thread_pool)
 /*
  *从链表中获取任务指针
  */
-static mgThreadpool_task *get_task_from_list(mglist head)
+static mgThreadpool_task *get_task_from_list(mglist_t *head)
 {
-    if (mglist_empty_careful(&head))
+    if (mglist_empty_careful(head))
         return NULL;
-    mgThreadpool *task = mglist_entry(head.prev, mgThreadpool, list_node);
-    mglist_del_init(head.prev);
+    mgThreadpool_task *task = mglist_entry(head->prev, mgThreadpool_task, list_node);
+    mglist_del_init(head->prev);
     return task;
 }
 
 /*
  *将任务添加到链表中去
  */
-static void put_task_from_list(mglist head, mgThreadpool_task *task)
+static void put_task_from_list(mglist_t *head, mgThreadpool_task *task)
 {
-    mglist_add(&head, &(task->list_node));
+    mglist_add(&(task->list_node), head);
     return;
 }
 
 /*
  *线程运行函数
  */
-static void mgThreadpool_thread_run(void *arg)
+static void* mgThreadpool_thread_run(void *arg)
 {
     mgThreadpool *thread_pool = (mgThreadpool *)arg;
     mgThreadpool_thread *thread = NULL;
@@ -187,39 +145,44 @@ static void mgThreadpool_thread_run(void *arg)
             break;
         }
     }
-    if (thread)
+    if (!thread)
         return;
     while(!thread_pool->close_flag)
     {
-        //pthread_mutex_lock(&(thread_pool->task_process_mutex));
+        pthread_mutex_lock(&(thread_pool->task_process_mutex));
         while(!thread_pool->close_flag && 
-                ( mglist_empty_careful(thread_pool->long_task_queue) && 
-                  mglist_empty_careful(thread->thread_task_list)))
+                ( mglist_empty_careful(&(thread_pool->long_task_queue)) && 
+                  mglist_empty_careful(&(thread->thread_task_list))))
         {
-            pthread_cond_wait(&(thread_pool->task_process_cond), NULL);
+            printf("are you sleep!\n");
+            pthread_cond_wait(&(thread_pool->task_process_cond), &(thread_pool->task_process_mutex));
         }
-        //pthread_mutex_unlock(&(thread_pool->task_process_mutex));
-        if (mglist_empty_careful(thread->thread_task_list))//优先处理短任务，如果短任务为空，则处理长任务
+        pthread_mutex_unlock(&(thread_pool->task_process_mutex));
+        printf("are you wake up!\n");
+        if (mglist_empty_careful(&(thread->thread_task_list)))//优先处理短任务，如果短任务为空，则处理长任务
         {
             thread->is_busy = 1;
             pthread_mutex_lock(&(thread_pool->long_task_mutex));
-            task = get_task_from_list(thread_pool->long_task_queue);
+            task = get_task_from_list(&(thread_pool->long_task_queue));
+            thread_pool->long_task_num--;
             pthread_mutex_unlock(&(thread_pool->long_task_mutex));
         }
         else
         {
             pthread_mutex_lock(&(thread->thread_mutex));
-            task = get_task_from_list(thread->thread_task_list);
+            task = get_task_from_list(&(thread->thread_task_list));
+            thread->thread_task_num--;
             pthread_mutex_unlock(&(thread->thread_mutex));
         }
         if (task)
         {
-            (*task->task_function)(task->task_arg);
+            printf(" run task!\n");
+            (*(task->task_function))(task->task_arg);
             mgThreadpool_put_idle_task(thread_pool, task);
         }
         thread->is_busy = 0;
     }
-    return;
+    return NULL;
 }
 
 /*
@@ -246,10 +209,10 @@ mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num)
     int i;
     if (thread_pool)
     {
-        int cpu_num = (int)(sysconf(_SC_NPROCESSORS_CONF));
-        if (thread_num < cpu_num)
-            thread_pool->thread_num = cpu_num;
-        else
+        //int cpu_num = (int)(sysconf(_SC_NPROCESSORS_CONF));
+        //if (thread_num < cpu_num)
+        //    thread_pool->thread_num = cpu_num;
+        //else
             thread_pool->thread_num = thread_num;
 
         if (max_task_num <= 0)
@@ -258,6 +221,7 @@ mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num)
             thread_pool->max_task_num = max_task_num;
 
         mglist_init(&thread_pool->long_task_queue);
+        printf("thread_pool->long_task_queue = %p\n",&(thread_pool->long_task_queue));
         thread_pool->long_task_num = 0;
 
         pthread_mutex_init(&(thread_pool->long_task_mutex), NULL);
@@ -284,8 +248,9 @@ mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num)
         {
             thread_pool->thread[i].is_busy = 0;
             thread_pool->thread[i].thread_task_num = 0;
-            pthread_mutex_init(&(thread_pool->thread[i].thread_mutex));
+            pthread_mutex_init(&(thread_pool->thread[i].thread_mutex), NULL);
             mglist_init(&(thread_pool->thread[i].thread_task_list));
+            printf("thread_pool->thread_pool[i].thread_task_list = %p\n",&(thread_pool->thread[i].thread_task_list));
             pthread_create(&(thread_pool->thread[i].thread_id), NULL, 
                     mgThreadpool_thread_run, (void *)(thread_pool));
         }
@@ -294,9 +259,9 @@ mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num)
     return thread_pool;
 }
 
-int mgThreadpool_add_task(mgThreadpool *thread_pool, mgThreadpool_task_fun fun, void *arg, int priority_level)
+int mgThreadpool_add_task(mgThreadpool *thread_pool, mgThreadpool_task_fun *fun, void *arg, int priority_level)
 {
-    mgThreadpool_thread *task = mgThreadpool_get_idle_task(thread_pool);
+    mgThreadpool_task *task = mgThreadpool_get_idle_task(thread_pool);
     if (!thread_pool || !task )
         return -1;
     task->task_function = fun;
@@ -307,17 +272,21 @@ int mgThreadpool_add_task(mgThreadpool *thread_pool, mgThreadpool_task_fun fun, 
     {
         mgThreadpool_thread *thread = get_least_task_thread(thread_pool);
         pthread_mutex_lock(&(thread->thread_mutex));
-        put_task_from_list(thread->thread_task_list, task);
+        put_task_from_list(&(thread->thread_task_list), task);
+        thread->thread_task_num++;
         pthread_mutex_unlock(&(thread->thread_mutex));
     }
     else
     {
         pthread_mutex_lock(&(thread_pool->long_task_mutex));
-        put_task_from_list(thread_pool->long_task_queue, task);
+        put_task_from_list(&(thread_pool->long_task_queue), task);
+        thread_pool->long_task_num++;
         pthread_mutex_unlock(&(thread_pool->long_task_mutex));
     }
-
-    pthread_cond_broadcast(thread_pool->task_process_cond);
+    pthread_mutex_lock(&(thread_pool->task_process_mutex));
+    printf("are you call the thread!\n");
+    pthread_cond_broadcast(&(thread_pool->task_process_cond));
+    pthread_mutex_unlock(&(thread_pool->task_process_mutex));
     return 0;
 }
 
@@ -326,12 +295,14 @@ void mgThreadpool_finish(mgThreadpool *thread_pool)
     if (!thread_pool || thread_pool->close_flag)
         return;
     int i = 0, j = 0; 
-    mglist *pos = NULL, *n = NULL;
+    mglist_t *pos = NULL, *n = NULL;
     mgThreadpool_task *task = NULL;
 
     //通知所有线程结束处理
     thread_pool->close_flag = 1;
-    pthread_cond_broadcast(thread_pool->task_process_cond);
+    pthread_mutex_lock(&(thread_pool->task_process_mutex));
+    pthread_cond_broadcast(&(thread_pool->task_process_cond));
+    pthread_mutex_unlock(&(thread_pool->task_process_mutex));
     
     for ( i = 0; i < thread_pool->thread_num; i ++)
     {
@@ -352,21 +323,50 @@ void mgThreadpool_finish(mgThreadpool *thread_pool)
     }
     
     //清理所有线程中的短任务
-    for ( i=0; i < thread_pool->thread_num; i++)
+    if (thread_pool->thread)
     {
-        mglist_for_each_safe(pos, n, &(thread_pool->thread[i].thread_task_list))
+        for ( i=0; i < thread_pool->thread_num; i++)
         {
-            task = mglist_entry(pos, mgThreadpool_task, list_node);
-            free(task);
+            mglist_for_each_safe(pos, n, &(thread_pool->thread[i].thread_task_list))
+            {
+                task = mglist_entry(pos, mgThreadpool_task, list_node);
+                free(task);
+            }
+            pthread_mutex_destroy(&(thread_pool->thread[i].thread_mutex));
         }
-        pthread_mutex_destroy(&(thread_pool->thread[i].thread_mutex));
+        free(thread_pool->thread);
+        thread_pool->thread = NULL;
     }
     pthread_mutex_destroy(&(thread_pool->long_task_mutex));
     pthread_mutex_destroy(&(thread_pool->idle_task_mutex));
     pthread_mutex_destroy(&(thread_pool->task_process_mutex));
     pthread_cond_destroy(&(thread_pool->task_process_cond));
-    free(thread_pool->thread);
+    free(thread_pool);
+    thread_pool = NULL;
     return;
+}
+
+void printf_mgthread_pool(mgThreadpool *thread_pool)
+{
+    printf("=============mgThreadpool===============\n");
+    printf("== mgThreadpool : %p \n", thread_pool);
+    if (thread_pool)
+    {
+        printf("== thread pool num : %d \n", thread_pool->thread_num);
+        printf("== thread pool max_task_num : %d\n", thread_pool->max_task_num);
+        printf("== thread pool long_task_num : %d\n", thread_pool->long_task_num);
+        printf("== thread pool idle_task_count : %d\n", thread_pool->idle_task_count); 
+        printf("== thread pool idle_task_num : %d\n", thread_pool->idle_task_num); 
+        int i = 0;
+        for ( i = 0; i < thread_pool->thread_num; i ++)
+        {
+            printf("== thread pool %d thread - -:\n", i);
+            printf("  -- thread id : %u - -\n", thread_pool->thread[i].thread_id);
+            printf("  -- thread is busy : %s - -\n", thread_pool->thread[i].is_busy?"YES":"NO");
+            printf("  -- thread task num : %d - -\n", thread_pool->thread[i].thread_task_num);
+        }
+        printf("=======================================\n\n");
+    }
 }
 
 //sysconf
