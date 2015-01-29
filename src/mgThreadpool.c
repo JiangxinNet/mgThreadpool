@@ -154,11 +154,9 @@ static void* mgThreadpool_thread_run(void *arg)
                 ( mglist_empty_careful(&(thread_pool->long_task_queue)) && 
                   mglist_empty_careful(&(thread->thread_task_list))))
         {
-            printf("are you sleep!\n");
             pthread_cond_wait(&(thread_pool->task_process_cond), &(thread_pool->task_process_mutex));
         }
         pthread_mutex_unlock(&(thread_pool->task_process_mutex));
-        printf("are you wake up!\n");
         if (mglist_empty_careful(&(thread->thread_task_list)))//优先处理短任务，如果短任务为空，则处理长任务
         {
             thread->is_busy = 1;
@@ -176,7 +174,6 @@ static void* mgThreadpool_thread_run(void *arg)
         }
         if (task)
         {
-            printf(" run task!\n");
             (*(task->task_function))(task->task_arg);
             mgThreadpool_put_idle_task(thread_pool, task);
         }
@@ -221,7 +218,6 @@ mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num)
             thread_pool->max_task_num = max_task_num;
 
         mglist_init(&thread_pool->long_task_queue);
-        printf("thread_pool->long_task_queue = %p\n",&(thread_pool->long_task_queue));
         thread_pool->long_task_num = 0;
 
         pthread_mutex_init(&(thread_pool->long_task_mutex), NULL);
@@ -250,7 +246,6 @@ mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num)
             thread_pool->thread[i].thread_task_num = 0;
             pthread_mutex_init(&(thread_pool->thread[i].thread_mutex), NULL);
             mglist_init(&(thread_pool->thread[i].thread_task_list));
-            printf("thread_pool->thread_pool[i].thread_task_list = %p\n",&(thread_pool->thread[i].thread_task_list));
             pthread_create(&(thread_pool->thread[i].thread_id), NULL, 
                     mgThreadpool_thread_run, (void *)(thread_pool));
         }
@@ -284,7 +279,6 @@ int mgThreadpool_add_task(mgThreadpool *thread_pool, mgThreadpool_task_fun *fun,
         pthread_mutex_unlock(&(thread_pool->long_task_mutex));
     }
     pthread_mutex_lock(&(thread_pool->task_process_mutex));
-    printf("are you call the thread!\n");
     pthread_cond_broadcast(&(thread_pool->task_process_cond));
     pthread_mutex_unlock(&(thread_pool->task_process_mutex));
     return 0;
