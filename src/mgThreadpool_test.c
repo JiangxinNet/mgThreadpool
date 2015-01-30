@@ -1,8 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <pthread.h>
-
 #include "mgThreadpool.h"
 
 pthread_mutex_t long_task_metux = PTHREAD_MUTEX_INITIALIZER;
@@ -37,7 +35,7 @@ void short_task_test(void *arg)
 
 int main()
 {
-    mgThreadpool *tp = mgThreadpool_init(4, 0);
+    mgThreadpool *tp = mgThreadpool_init(4, 0, 0);
     printf_mgthread_pool(tp);
     int i = 0;
     for (i = 0; i < 10; i ++)

@@ -1,6 +1,15 @@
 #ifndef __MG_THREAD_POOL_H_
 #define __MG_THREAD_POOL_H_
 
+//#define _MG_THREAD_POOL_CPU_AFFINITY_
+
+#ifdef _MG_THREAD_POOL_CPU_AFFINITY_
+#ifndef __USE_GNU//_GNU_SOURCE
+#define __USE_GNU//_GNU_SOURCE 
+#endif
+#endif
+
+#include <sched.h>
 #include <pthread.h>
 #include <mgStd/mglist.h>
 
@@ -45,10 +54,13 @@ typedef struct mgThreadpool
     pthread_mutex_t         idle_task_mutex;        //空闲任务锁
 
     int                     close_flag;             //关闭标志
+#ifdef _MG_THREAD_POOL_CPU_AFFINITY_
+    cpu_set_t               cpuset;
+#endif
 
 }mgThreadpool;
 
-mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num);
+mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num, int cpu_id);
 
 int mgThreadpool_add_task(mgThreadpool *thread_pool, mgThreadpool_task_fun *fun, void *arg, int priority_level);
 

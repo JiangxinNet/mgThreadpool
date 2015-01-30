@@ -1,9 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <unistd.h>
 #include <mgStd/mglist.h>
-
 #include "mgThreadpool.h"
 
 /*
@@ -136,6 +134,9 @@ static void* mgThreadpool_thread_run(void *arg)
     mgThreadpool_thread *thread = NULL;
     mgThreadpool_task *task = NULL;
     pthread_t self_id = pthread_self();
+#ifdef _MG_THREAD_POOL_CPU_AFFINITY_
+    sched_setaffinity(0, sizeof(thread_pool->cpuset), &(thread_pool->cpuset));
+#endif
     int i = 0;
     for (i = 0; i < thread_pool->thread_num; i++)
     {
@@ -162,14 +163,14 @@ static void* mgThreadpool_thread_run(void *arg)
             thread->is_busy = 1;
             pthread_mutex_lock(&(thread_pool->long_task_mutex));
             task = get_task_from_list(&(thread_pool->long_task_queue));
-            thread_pool->long_task_num--;
+            if (task != NULL) thread_pool->long_task_num--;
             pthread_mutex_unlock(&(thread_pool->long_task_mutex));
         }
         else
         {
             pthread_mutex_lock(&(thread->thread_mutex));
             task = get_task_from_list(&(thread->thread_task_list));
-            thread->thread_task_num--;
+            if (task != NULL) thread->thread_task_num--;
             pthread_mutex_unlock(&(thread->thread_mutex));
         }
         if (task)
@@ -191,7 +192,8 @@ static mgThreadpool_thread *get_least_task_thread(mgThreadpool *thread_pool)
     int i = 0;
     for (i = 1; i < thread_pool->thread_num; i++)
     {
-        if (thread_pool->thread[i].thread_task_num < least_task_thread->thread_task_num)
+        if (thread_pool->thread[i].thread_task_num < least_task_thread->thread_task_num &&
+                (!thread_pool->thread[i].is_busy))
             least_task_thread = &(thread_pool->thread[i]);
     }
     return least_task_thread;
@@ -200,22 +202,24 @@ static mgThreadpool_thread *get_least_task_thread(mgThreadpool *thread_pool)
 /*
  *线程池初始化
  */
-mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num)
+mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num, int cpu_id)
 {
     mgThreadpool *thread_pool = (mgThreadpool *)malloc(sizeof(mgThreadpool));
     int i;
     if (thread_pool)
     {
-        //int cpu_num = (int)(sysconf(_SC_NPROCESSORS_CONF));
-        //if (thread_num < cpu_num)
-        //    thread_pool->thread_num = cpu_num;
-        //else
-            thread_pool->thread_num = thread_num;
+        thread_pool->thread_num = thread_num;
+        thread_pool->max_task_num = max_task_num;
+        
+        int cpu_num = (int)(sysconf(_SC_NPROCESSORS_CONF));
+        if (thread_num < cpu_num)
+            thread_pool->thread_num = cpu_num;
+
+        if (thread_pool->thread_num > MGTHREADPOOL_MAX_THREAD)
+            thread_pool->thread_num = MGTHREADPOOL_MAX_THREAD;
 
         if (max_task_num <= 0)
             thread_pool->max_task_num = MGTHREADPOOL_DEFAULT_MAX_TASK;
-        else
-            thread_pool->max_task_num = max_task_num;
 
         mglist_init(&thread_pool->long_task_queue);
         thread_pool->long_task_num = 0;
@@ -230,6 +234,11 @@ mgThreadpool* mgThreadpool_init(int thread_num, int max_task_num)
         mgThreadpool_idle_task_init(thread_pool);
 
         thread_pool->close_flag = 0;
+
+#ifdef _MG_THREAD_POOL_CPU_AFFINITY_
+        CPU_ZERO(&(thread_pool->cpuset));
+        CPU_SET(cpu_id%cpu_num, &(thread_pool->cpuset));
+#endif
 
         thread_pool->thread = 
             (mgThreadpool_thread *)malloc(sizeof(mgThreadpool_thread) * thread_pool->thread_num);
@@ -266,17 +275,27 @@ int mgThreadpool_add_task(mgThreadpool *thread_pool, mgThreadpool_task_fun *fun,
     if (priority_level)//0为长任务, 非0为短任务
     {
         mgThreadpool_thread *thread = get_least_task_thread(thread_pool);
-        pthread_mutex_lock(&(thread->thread_mutex));
-        put_task_from_list(&(thread->thread_task_list), task);
-        thread->thread_task_num++;
-        pthread_mutex_unlock(&(thread->thread_mutex));
+        if (thread->thread_task_num < thread_pool->max_task_num)
+        {
+            pthread_mutex_lock(&(thread->thread_mutex));
+            put_task_from_list(&(thread->thread_task_list), task);
+            thread->thread_task_num++;
+            pthread_mutex_unlock(&(thread->thread_mutex));
+        }
+        else
+            return -2;
     }
     else
     {
-        pthread_mutex_lock(&(thread_pool->long_task_mutex));
-        put_task_from_list(&(thread_pool->long_task_queue), task);
-        thread_pool->long_task_num++;
-        pthread_mutex_unlock(&(thread_pool->long_task_mutex));
+        if (thread_pool->long_task_num < thread_pool->max_task_num)
+        {
+            pthread_mutex_lock(&(thread_pool->long_task_mutex));
+            put_task_from_list(&(thread_pool->long_task_queue), task);
+            thread_pool->long_task_num++;
+            pthread_mutex_unlock(&(thread_pool->long_task_mutex));
+        }
+        else
+            return -3;
     }
     pthread_mutex_lock(&(thread_pool->task_process_mutex));
     pthread_cond_broadcast(&(thread_pool->task_process_cond));
@@ -303,7 +322,9 @@ void mgThreadpool_finish(mgThreadpool *thread_pool)
         //等待所有线程退出
         pthread_join(thread_pool->thread[i].thread_id, NULL);
     }
-    
+   
+    printf_mgthread_pool(thread_pool);
+
     //清理空闲任务链表缓存中的任务
     if (thread_pool->idle_task)
         mgThreadpool_idle_task_finish(thread_pool);

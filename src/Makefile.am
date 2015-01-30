@@ -10,9 +10,9 @@ libmgThreadpooldir=@includedir@/mgThreadpool
 noinst_PROGRAMS=mgThreadpool_test
 
 mgThreadpool_test_DEPENDENCIES=
-mgThreadpool_test_CFLAGS= 
+mgThreadpool_test_CFLAGS= -D_MG_THREAD_POOL_CPU_AFFINITY_ 
 mgThreadpool_test_LDADD=#./libmgThreadpool.la 
-mgThreadpool_test_SOURCES= mgThreadpool_test.c mgThreadpool.c
+mgThreadpool_test_SOURCES= mgThreadpool_test.c mgThreadpool.c mgThreadpool.h 
 mgThreadpool_test_LDFLAGS= -lmgStd -lpthread
 
 
